@@ -156,6 +156,7 @@ fileprivate struct TileArc: Tile {
 // MARK: - Engine
 @MainActor final class TileMosaicEngine: ObservableObject {
     @Published fileprivate var tiles: [any Tile] = []
+    enum Kind: CaseIterable { case tris, triSquare, lines, arc }
     var n: Int = 10
     var changeInterval: Double = 0.03 // seconds per animation frame step
     var idealLength: Int = 50
@@ -175,6 +176,16 @@ fileprivate struct TileArc: Tile {
     var noisePhaseY: CGFloat = 0
     var candidateK: Int = 20                   // blue-noise: number of random candidates per pick
     var neighborRadius: CGFloat = 1.25         // blue-noise: how far to check occupancy
+    // Surprise controls
+    var repetitionPenalty: CGFloat = 0.4       // penalize recently頻出の種類
+    var recentKinds: [Kind] = []               // 最近の種類（上限 recentCap）
+    let recentCap: Int = 64
+    var lastColorIndex: Int = -1
+    // Rare-event scheduler（群発など）
+    var hazard: CGFloat = 0
+    var lastRareTS: CFTimeInterval = 0
+    var rareCooldown: CFTimeInterval = 2.0
+    var spawnBurstFramesRemaining: Int = 0
 
     fileprivate func reseed(size: CGSize) {
         palette = palettes.randomElement()!
@@ -202,7 +213,7 @@ fileprivate struct TileArc: Tile {
         func key(_ x: CGFloat, _ y: CGFloat) -> String { "\(x),\(y)" }
         while res.count < count && tries < 1000 {
             let spot = findSpotBlueNoise(addTiles: res, occupied: &occupied)
-            if let s = spot, let tile = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
+            if let s = spot, let tile = maybeMakeTile(x: s.x, y: s.y, sz: s.sz, audio: nil) {
                 res.append(tile)
                 occupied.insert(key(s.x, s.y))
                 tries = 0
@@ -245,22 +256,28 @@ fileprivate struct TileArc: Tile {
         return nil
     }
 
-    fileprivate func maybeMakeTile(x: CGFloat, y: CGFloat, sz: Int) -> (any Tile)? {
+    fileprivate func maybeMakeTile(x: CGFloat, y: CGFloat, sz: Int, audio: AudioAnalyzer?) -> (any Tile)? {
         // randomized noise phase to avoid fixed spatial bias
         let nval = noise2((x + noisePhaseX)*CGFloat(sz)*noiseFreq, (y + noisePhaseY)*CGFloat(sz)*noiseFreq)
         if nval < 1 - noiseChance { return nil }
-        return makeTile(x: x, y: y, sz: sz)
+        return makeTile(x: x, y: y, sz: sz, audio: audio)
     }
 
-    fileprivate func makeTile(x: CGFloat, y: CGFloat, sz: Int) -> any Tile {
-        let options: [any Tile] = [
-            TileTris(x: x, y: y, sz: sz, rotate: 0, color: palette.colors.randomElement()!, dur: duration),
-            TileTriSquare(x: x, y: y, sz: sz, rotate: 0, color: palette.colors.randomElement()!, dur: duration),
-            TileLines(x: x, y: y, sz: sz, rotate: 0, color: palette.colors.randomElement()!, dur: duration),
-            TileArc(x: x, y: y, sz: sz, rotate: 0, color: palette.colors.randomElement()!, dur: duration)
-        ]
-        let weights = [5.0, 2.0, 4.0, 0.8]
-        var tile = weightedRandom(options, weights)
+    fileprivate func makeTile(x: CGFloat, y: CGFloat, sz: Int, audio: AudioAnalyzer?) -> any Tile {
+        let kind = pickKind(audio: audio)
+        let clr = pickColor()
+        var tile: any Tile
+        switch kind {
+        case .tris:
+            tile = TileTris(x: x, y: y, sz: sz, rotate: 0, color: clr, dur: duration)
+        case .triSquare:
+            tile = TileTriSquare(x: x, y: y, sz: sz, rotate: 0, color: clr, dur: duration)
+        case .lines:
+            tile = TileLines(x: x, y: y, sz: sz, rotate: 0, color: clr, dur: duration)
+        case .arc:
+            tile = TileArc(x: x, y: y, sz: sz, rotate: 0, color: clr, dur: duration)
+        }
+        record(kind: kind)
         var rotateOpts: [Int] = []
         if x + CGFloat(sz) <= CGFloat(n - 1) { rotateOpts.append(1) }
         if x - CGFloat(sz) >= 0 { rotateOpts.append(3) }
@@ -268,6 +285,49 @@ fileprivate struct TileArc: Tile {
         if y - CGFloat(sz) >= 0 { rotateOpts.append(0) }
         if let r = rotateOpts.randomElement() { tile.rotate = r }
         return tile
+    }
+
+    private func pickColor() -> Color {
+        let colors = palette.colors
+        guard !colors.isEmpty else { return .white }
+        if colors.count == 1 { lastColorIndex = 0; return colors[0] }
+        var idx = Int.random(in: 0..<colors.count)
+        if idx == lastColorIndex && Double.random(in: 0...1) < 0.7 { idx = (idx + 1) % colors.count }
+        lastColorIndex = idx
+        return colors[idx]
+    }
+
+    private func pickKind(audio: AudioAnalyzer?) -> Kind {
+        var w: [Kind: Double] = [.tris: 5.0, .triSquare: 2.0, .lines: 4.0, .arc: 0.8]
+        if let a = audio {
+            let mid = Double(max(0, min(1, a.mid)))
+            let high = Double(max(0, min(1, a.high)))
+            w[.lines]! *= 1.0 + 0.8 * mid
+            w[.arc]!   *= 1.0 + 1.1 * high
+        }
+        // anti-repetition
+        let freq = recentFrequency()
+        for k in Kind.allCases {
+            let p = Double(max(0, 1.0 - repetitionPenalty * freq[k, default: 0]))
+            w[k]! *= max(0.1, p)
+        }
+        let kinds = Kind.allCases
+        let weights = kinds.map { w[$0]! }
+        return weightedRandom(kinds, weights)
+    }
+
+    private func record(kind: Kind) {
+        recentKinds.append(kind)
+        if recentKinds.count > recentCap { recentKinds.removeFirst(recentKinds.count - recentCap) }
+    }
+
+    private func recentFrequency() -> [Kind: CGFloat] {
+        var counts: [Kind: Int] = [:]
+        for k in recentKinds { counts[k, default: 0] += 1 }
+        let total = max(1, recentKinds.count)
+        var freq: [Kind: CGFloat] = [:]
+        for k in Kind.allCases { freq[k] = CGFloat(counts[k, default: 0]) / CGFloat(total) }
+        return freq
     }
 
     fileprivate func step(now: CFTimeInterval, audio: AudioAnalyzer) {
@@ -280,11 +340,33 @@ fileprivate struct TileArc: Tile {
             lastBeatTime = now
             randomFlip(count: Int.random(in: 1...3))
         }
-        // Soft refresh: if too few tiles, add more
+        // Rare-event scheduler (hazard grows with time and flux)
+        hazard = min(1.0, hazard + CGFloat(dt) * 0.08 + 0.2 * audio.flux)
+        if now - lastRareTS > rareCooldown {
+            let triggerProb = min(0.9, Double(hazard))
+            if Double.random(in: 0...1) < triggerProb {
+                lastRareTS = now
+                hazard = 0
+                spawnBurstFramesRemaining = Int.random(in: 2...4)
+                randomFlip(count: Int.random(in: 3...7))
+            }
+        }
+        // Soft refresh: if too few tiles, add more (spawn budget per tick)
         if tiles.count < idealLength {
-            var scratch = Set<String>()
-            if let s = findSpotBlueNoise(addTiles: tiles, occupied: &scratch), let t = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
-                tiles.append(t)
+            let deficit = idealLength - tiles.count
+            var budget = min(3, max(1, deficit / 5))
+            if spawnBurstFramesRemaining > 0 { budget = min(3, budget + 2); spawnBurstFramesRemaining -= 1 }
+            for _ in 0..<budget {
+                var scratch = Set<String>()
+                if let s = findSpotBlueNoise(addTiles: tiles, occupied: &scratch) {
+                    // Choose size: small frequent; bass boosts chance for bigger tiles
+                    let baseP2: Double = 0.18
+                    let p2 = baseP2 + 0.25 * Double(max(0, min(1, audio.low)))
+                    let chosenSz = (Double.random(in: 0...1) < p2) ? max(1, s.sz) : 1
+                    if let t = maybeMakeTile(x: s.x, y: s.y, sz: chosenSz, audio: audio) {
+                        tiles.append(t)
+                    }
+                }
             }
         }
         // Remove hidden
