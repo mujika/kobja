@@ -124,7 +124,6 @@ fragment float4 mirrorFragment(VSOut in [[stage_in]],
                                constant MirrorUniforms& u [[buffer(0)]],
                                texture2d<float> camTex [[texture(0)]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float2 R = u.resolution;
     float2 uv = in.uv;
     float2 grid = float2(max(1.0,u.cols), max(1.0,u.rows));
     float2 suv = uv * grid;
@@ -151,7 +150,8 @@ fragment float4 mirrorFragment(VSOut in [[stage_in]],
     float w = max(0.0005, u.seamWidth);
     float ax = smoothstep(w, 0.0, seamX);
     float ay = smoothstep(w, 0.0, seamY);
-    float seam = max(ax, 0.0); // emphasize vertical
+    // combine seams: keep vertical dominant, but use a fraction of horizontal
+    float seam = max(ax, ay * 0.6);
     float seamHL = pow(seam, 2.0) * u.seamBright;
     col.rgb += seamHL;
 

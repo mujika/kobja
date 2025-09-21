@@ -31,7 +31,15 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         output.setSampleBufferDelegate(self, queue: queue)
         if session.canAddOutput(output) { session.addOutput(output) }
-        if let conn = output.connection(with: .video) { conn.videoOrientation = .portrait }
+        if let conn = output.connection(with: .video) {
+            if #available(macOS 14.0, *) {
+                // 90° rotation approximates portrait in macOS APIs
+                conn.videoRotationAngle = 90
+            } else {
+                // Deprecated on macOS 14+, but used for backward compatibility
+                conn.videoOrientation = .portrait
+            }
+        }
         session.commitConfiguration()
     }
 
@@ -48,4 +56,3 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         if let tex = CVMetalTextureGetTexture(cvTex!) { onTexture?(tex) }
     }
 }
-

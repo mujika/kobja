@@ -135,18 +135,24 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         guard let cmd = queue.makeCommandBuffer(), let enc = cmd.makeRenderCommandEncoder(descriptor: rpd) else { return }
-        switch mode {
-        case .kaleido:
-            enc.setRenderPipelineState(pipelineKaleido)
-            enc.setVertexBytes(&uniforms, length: MemoryLayout<VisualUniforms>.stride, index: 0)
-            enc.setFragmentBytes(&uniforms, length: MemoryLayout<VisualUniforms>.stride, index: 0)
-        case .mirror:
+        // Fallback: if mirror mode but camera is unavailable, render kaleido to ensure visible pattern
+        let useMirror: Bool = {
+            if mode != .mirror { return false }
+            if let tex = cameraTexture, tex.width > 0 && tex.height > 0 { return true }
+            return false
+        }()
+
+        if useMirror {
             enc.setRenderPipelineState(pipelineMirror)
             mirror.resolution = uniforms.resolution
             mirror.seed = uniforms.seed
             enc.setVertexBytes(&mirror, length: MemoryLayout<MirrorUniforms>.stride, index: 0)
             enc.setFragmentBytes(&mirror, length: MemoryLayout<MirrorUniforms>.stride, index: 0)
             if let tex = cameraTexture { enc.setFragmentTexture(tex, index: 0) }
+        } else {
+            enc.setRenderPipelineState(pipelineKaleido)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<VisualUniforms>.stride, index: 0)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<VisualUniforms>.stride, index: 0)
         }
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
