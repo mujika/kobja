@@ -392,31 +392,9 @@ struct ReactiveBlueView: View {
 
     var body: some View {
         Group {
-            if MTLCreateSystemDefaultDevice() != nil {
-                MetalVisualView(seed: sessionSeed, baseRGB: palette.baseRGB, accentRGB: palette.accentRGB, mode: .mirror)
-                    .contentShape(Rectangle())
-                    .onTapGesture { reseed(crossfade: true) }
-            } else {
-                TimelineView(.animation) { timeline in
-                    let now = timeline.date
-                    let time = now.timeIntervalSince(startDate)
-                    let fade: CGFloat = {
-                        if next != nil {
-                            let p = CGFloat(min(1.0, max(0.0, now.timeIntervalSince(cycleStart) / crossfadeDuration)))
-                            return p
-                        } else { return 0 }
-                    }()
-                    Canvas { ctx, size in
-                        let lv = audio.level
-                        if let e = current { ctx.opacity = Double(1.0 - fade); e.draw(&ctx, size, lv, time) }
-                        if let n = next { ctx.opacity = Double(fade); n.draw(&ctx, size, lv, time) }
-                    }
-                    .onChange(of: now) { _, newNow in tick(now: newNow) }
-                }
-            }
+            // Replace current effect with the Mosaic effect
+            TileMosaicView()
         }
-        .blur(radius: 4 + 18 * audio.level)
-        .scaleEffect(1 + 0.06 * audio.level, anchor: .center)
         .animation(.easeOut(duration: 0.06), value: audio.level)
         .ignoresSafeArea()
         .onAppear {
