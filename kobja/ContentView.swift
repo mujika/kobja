@@ -10,6 +10,7 @@ import AppKit
 import AVFoundation
 import Accelerate
 import Combine
+import simd
 
 // SwiftUI Preview / Playgrounds 検出
 private func isRunningInPreview() -> Bool {
@@ -36,13 +37,16 @@ final class AudioAnalyzer: ObservableObject {
     static let shared = AudioAnalyzer()
 
     @Published var level: CGFloat = 0  // 0...1 に正規化した音量
-    // 帯域用プレースホルダ（将来拡張: FFT等）
-    @Published var low: CGFloat = 0
-    @Published var mid: CGFloat = 0
-    @Published var high: CGFloat = 0
+    @Published var low: CGFloat = 0    // FFT帯域エネルギー（低）
+    @Published var mid: CGFloat = 0    // FFT帯域エネルギー（中）
+    @Published var high: CGFloat = 0   // FFT帯域エネルギー（高）
+    @Published var centroid: CGFloat = 0  // スペクトル重心（Hz）
+    @Published var flux: CGFloat = 0      // スペクトルフラックス
+    @Published var beat: Bool = false     // 簡易ビート検出
 
     private let engine = AVAudioEngine()
     private var isRunning = false
+    private var featureExtractor: AudioFeatureExtractor?
     private var smoothing: Float = 0
     // 自動ゲイン制御（環境音量に自動追従）
     private var agcPeak: Float = 0.02
@@ -61,6 +65,11 @@ final class AudioAnalyzer: ObservableObject {
         // Remove any existing tap to avoid duplicate taps
         input.removeTap(onBus: 0)
 
+        // FFT 初期化
+        if self.featureExtractor == nil {
+            self.featureExtractor = AudioFeatureExtractor(sampleRate: Double(format.sampleRate), fftSize: Int(bufferSize))
+        }
+
         input.installTap(onBus: 0, bufferSize: bufferSize, format: format) { [weak self] buffer, _ in
             guard let self else { return }
             guard let ptr = buffer.floatChannelData?[0] else { return }
@@ -71,7 +80,7 @@ final class AudioAnalyzer: ObservableObject {
             vDSP_rmsqv(ptr, 1, &rms, vDSP_Length(count))
 
             // ノイズゲート（極小値は切り捨て）
-            var g = max(0, rms - gate)
+            let g = max(0, rms - gate)
 
             // 自動ゲイン制御：最近のピークを少しずつ減衰させながら保持
             agcPeak = max(g, agcPeak * agcDecay)
@@ -82,10 +91,29 @@ final class AudioAnalyzer: ObservableObject {
             norm = max(0, min(1, norm))
             self.smoothing = (1 - emaAlpha) * self.smoothing + emaAlpha * norm
 
-            // UIへ反映
-            Task { @MainActor in
-                self.level = CGFloat(self.smoothing)
+            // FFT特徴量
+            if let fx = self.featureExtractor {
+                let feats = fx.process(buffer: ptr, frameCount: count)
+                // 正規化（描画用に軽めのスケール）
+                let norm: (Float) -> CGFloat = { CGFloat(min(1, max(0, $0 * 6))) }
+                let lo = norm(feats.low)
+                let mi = norm(feats.mid)
+                let hi = norm(feats.high)
+                let flux = CGFloat(min(1, feats.flux * 4))
+                let centroid = CGFloat(feats.centroid)
+                let beat = feats.beat
+                Task { @MainActor in
+                    self.low = lo
+                    self.mid = mi
+                    self.high = hi
+                    self.flux = flux
+                    self.centroid = centroid
+                    self.beat = beat
+                }
             }
+
+            // UIへ反映（RMS）
+            Task { @MainActor in self.level = CGFloat(self.smoothing) }
         }
 
         do {
@@ -134,6 +162,8 @@ fileprivate struct Palette {
     let base: Color
     let accent: Color
     let bgOpacityRange: ClosedRange<Double>
+    let baseRGB: SIMD3<Float>
+    let accentRGB: SIMD3<Float>
     static func randomBlueish(rng: inout SeededRNG) -> Palette {
         let hueBase = rng.next(in: 0.55...0.70) // 青→シアン寄り
         let hueAccent = hueBase + rng.next(in: -0.05...0.08)
@@ -142,9 +172,28 @@ fileprivate struct Palette {
         let brightAccent = min(1.0, brightBase + rng.next(in: -0.1...0.15))
         let base = Color(hue: Double(hueBase), saturation: Double(sat), brightness: Double(brightBase))
         let accent = Color(hue: Double(hueAccent), saturation: Double(sat), brightness: Double(brightAccent))
+        let baseRGB = hsbToRGB(Float(hueBase), Float(sat), Float(brightBase))
+        let accentRGB = hsbToRGB(Float(hueAccent), Float(sat), Float(brightAccent))
         let bgOpacityRange: ClosedRange<Double> = 0.45...0.95
-        return Palette(base: base, accent: accent, bgOpacityRange: bgOpacityRange)
+        return Palette(base: base, accent: accent, bgOpacityRange: bgOpacityRange, baseRGB: baseRGB, accentRGB: accentRGB)
     }
+}
+
+fileprivate func hsbToRGB(_ h: Float, _ s: Float, _ v: Float) -> SIMD3<Float> {
+    let hh = (h - floor(h)) * 6.0
+    let c = v * s
+    let x = c * (1 - fabsf(fmodf(hh, 2) - 1))
+    let m = v - c
+    var r: Float = 0, g: Float = 0, b: Float = 0
+    switch Int(hh) {
+    case 0: (r,g,b) = (c, x, 0)
+    case 1: (r,g,b) = (x, c, 0)
+    case 2: (r,g,b) = (0, c, x)
+    case 3: (r,g,b) = (0, x, c)
+    case 4: (r,g,b) = (x, 0, c)
+    default: (r,g,b) = (c, 0, x)
+    }
+    return SIMD3<Float>(r + m, g + m, b + m)
 }
 
 fileprivate struct AnyEffect {
@@ -166,29 +215,41 @@ fileprivate struct EffectFactory {
         let color = palette.accent
         return AnyEffect(name: "Rings") { ctx, size, level, t in
             // 背景
-            let baseOp = palette.bgOpacityRange.lowerBound + (palette.bgOpacityRange.upperBound - palette.bgOpacityRange.lowerBound) * Double(0.6 + 0.4 * level)
-            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color.blue.opacity(baseOp)))
+            let bgRange = palette.bgOpacityRange
+            let lvD = Double(level)
+            let baseOp = bgRange.lowerBound + (bgRange.upperBound - bgRange.lowerBound) * (0.6 + 0.4 * lvD)
+            let bgRect = CGRect(origin: .zero, size: size)
+            let bgPath = Path(bgRect)
+            let bgColor = Color.blue.opacity(baseOp)
+            let bgShading: GraphicsContext.Shading = .color(bgColor)
+            ctx.fill(bgPath, with: bgShading)
 
             let center = CGPoint(x: size.width/2, y: size.height/2)
             let maxDim = max(size.width, size.height)
             let baseR = maxDim * baseScale * (0.95 + 0.1 * level)
             ctx.translateBy(x: center.x, y: center.y)
-            ctx.rotate(by: rotation)
+            ctx.rotate(by: .radians(Double(rotation)))
             ctx.scaleBy(x: 1.0, y: ellipticity)
             // グロー
             let glowR = maxDim * (0.25 + 0.35 * level)
             let glowRect = CGRect(x: -glowR/2, y: -glowR/2, width: glowR, height: glowR)
-            ctx.fill(Path(ellipseIn: glowRect), with: .radialGradient(
-                .init(colors: [
-                    color.opacity(0.10 + 0.25 * level),
-                    .clear
-                ]),
-                center: .zero, startRadius: 0, endRadius: glowR/2
-            ))
+            let glowPath = Path(ellipseIn: glowRect)
+            let gradColors: [Color] = [
+                color.opacity(0.10 + 0.25 * level),
+                .clear
+            ]
+            let gradient = Gradient(colors: gradColors)
+            let glowShading = GraphicsContext.Shading.radialGradient(gradient,
+                                                                     center: .zero,
+                                                                     startRadius: 0,
+                                                                     endRadius: glowR/2)
+            ctx.fill(glowPath, with: glowShading)
             // リング
             for i in 0..<max(1, ringCount) {
                 let ti = CGFloat(i) / CGFloat(max(1, ringCount - 1))
-                let radius = baseR * (1.0 + spread * ti + noiseAmp * CGFloat(sin((Double(i) * 1.7 + t * 0.8))))
+                let phaseN = Double(i) * 1.7 + t * 0.8
+                let noise = CGFloat(sin(phaseN))
+                let radius = baseR * (1.0 + spread * ti + noiseAmp * noise)
                 let rect = CGRect(x: -radius/2, y: -radius/2, width: radius, height: radius)
                 let path = Path(ellipseIn: rect)
                 let w = max(0.5, thicknessBase + thicknessVar * (0.8 * (1 - ti) + 0.2 * level))
@@ -208,11 +269,17 @@ fileprivate struct EffectFactory {
         let color = palette.base
         return AnyEffect(name: "Waves") { ctx, size, level, t in
             // 背景
-            let baseOp = palette.bgOpacityRange.lowerBound + (palette.bgOpacityRange.upperBound - palette.bgOpacityRange.lowerBound) * Double(0.55 + 0.45 * level)
-            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color.blue.opacity(baseOp)))
+            let bgRangeW = palette.bgOpacityRange
+            let lvDW = Double(level)
+            let baseOpW = bgRangeW.lowerBound + (bgRangeW.upperBound - bgRangeW.lowerBound) * (0.55 + 0.45 * lvDW)
+            let bgRectW = CGRect(origin: .zero, size: size)
+            let bgPathW = Path(bgRectW)
+            let bgColorW = Color.blue.opacity(baseOpW)
+            let bgShadingW: GraphicsContext.Shading = .color(bgColorW)
+            ctx.fill(bgPathW, with: bgShadingW)
             let center = CGPoint(x: size.width/2, y: size.height/2)
             ctx.translateBy(x: center.x, y: center.y)
-            ctx.rotate(by: tilt)
+            ctx.rotate(by: .radians(Double(tilt)))
             ctx.translateBy(x: -center.x, y: -center.y)
             // サイン波の束
             for i in 0..<lines {
@@ -225,11 +292,20 @@ fileprivate struct EffectFactory {
                 let w = thickness * (0.6 + 1.6 * level)
                 for s in 1...steps {
                     let x = CGFloat(s) / CGFloat(steps) * size.width
-                    let yoff = A * sin((x / 80.0) * freq + (t * speed) + phase)
+                    let xd = Double(x)
+                    let freqD = Double(freq)
+                    let speedD = Double(speed)
+                    let phaseD = Double(phase)
+                    let phi = (xd / 80.0) * freqD + (t * speedD) + phaseD
+                    let yoff = A * CGFloat(sin(phi))
                     path.addLine(to: CGPoint(x: x, y: y + yoff))
                 }
-                let alpha = Double(0.05 + 0.25 * (1 - abs((y - size.height/2) / (size.height/2))))
-                ctx.stroke(path, with: .color(color.opacity(alpha)), lineWidth: w)
+                let cy: CGFloat = size.height / 2
+                let denom: CGFloat = max(1.0, cy)
+                let normCG: CGFloat = max(0, min(1, 1 - abs((y - cy) / denom)))
+                let alpha = Double(0.05 + 0.25 * normCG)
+                let shading: GraphicsContext.Shading = .color(color.opacity(alpha))
+                ctx.stroke(path, with: shading, lineWidth: w)
             }
         }
     }
@@ -253,8 +329,14 @@ fileprivate struct EffectFactory {
         }
         return AnyEffect(name: "Particles") { ctx, size, level, t in
             // 背景
-            let baseOp = palette.bgOpacityRange.lowerBound + (palette.bgOpacityRange.upperBound - palette.bgOpacityRange.lowerBound) * Double(0.50 + 0.50 * level)
-            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color.blue.opacity(baseOp)))
+            let bgRangeP = palette.bgOpacityRange
+            let lvDP = Double(level)
+            let baseOpP = bgRangeP.lowerBound + (bgRangeP.upperBound - bgRangeP.lowerBound) * (0.50 + 0.50 * lvDP)
+            let bgRectP = CGRect(origin: .zero, size: size)
+            let bgPathP = Path(bgRectP)
+            let bgColorP = Color.blue.opacity(baseOpP)
+            let bgShadingP: GraphicsContext.Shading = .color(bgColorP)
+            ctx.fill(bgPathP, with: bgShadingP)
             let c = CGPoint(x: size.width/2, y: size.height/2)
             let dotBase = 2.0 + 6.0 * level
             let tailCount = Int(3 + floor(level * 12 * tail))
@@ -299,7 +381,7 @@ struct ReactiveBlueView: View {
     // 乱数・効果
     @State private var sessionSeed: UInt64 = 0
     @State private var rng = SeededRNG(seed: 0)
-    @State private var palette: Palette = Palette(base: .blue, accent: .white, bgOpacityRange: 0.5...0.95)
+    @State private var palette: Palette = Palette(base: .blue, accent: .white, bgOpacityRange: 0.5...0.95, baseRGB: SIMD3<Float>(0.2,0.4,0.9), accentRGB: SIMD3<Float>(0.95,0.98,1.0))
     @State private var current: AnyEffect? = nil
     @State private var next: AnyEffect? = nil
     @State private var startDate = Date()
@@ -309,52 +391,37 @@ struct ReactiveBlueView: View {
     private let crossfadeDuration: TimeInterval = 2.4
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            let now = timeline.date
-            let time = now.timeIntervalSince(startDate)
-            Canvas { ctx, size in
-                let lv = audio.level
-                // 初期化
-                if current == nil {
-                    initSessionIfNeeded()
-                }
-                // 自動遷移管理
-                var fade: CGFloat = 0
-                if let _ = next {
-                    let p = CGFloat(min(1.0, max(0.0, now.timeIntervalSince(cycleStart) / crossfadeDuration)))
-                    fade = p
-                } else if now.timeIntervalSince(cycleStart) > cycleDuration {
-                    scheduleNextEffect()
-                }
-
-                // 描画（クロスフェード）
-                if let e = current {
-                    ctx.opacity = Double(1.0 - fade)
-                    e.draw(&ctx, size, lv, time)
-                }
-                if let n = next {
-                    ctx.opacity = Double(fade)
-                    n.draw(&ctx, size, lv, time)
-                    if fade >= 1.0 {
-                        current = n
-                        next = nil
-                        cycleStart = now
+        Group {
+            if MTLCreateSystemDefaultDevice() != nil {
+                MetalVisualView(seed: sessionSeed, baseRGB: palette.baseRGB, accentRGB: palette.accentRGB)
+                    .contentShape(Rectangle())
+                    .onTapGesture { reseed(crossfade: true) }
+            } else {
+                TimelineView(.animation) { timeline in
+                    let now = timeline.date
+                    let time = now.timeIntervalSince(startDate)
+                    let fade: CGFloat = {
+                        if next != nil {
+                            let p = CGFloat(min(1.0, max(0.0, now.timeIntervalSince(cycleStart) / crossfadeDuration)))
+                            return p
+                        } else { return 0 }
+                    }()
+                    Canvas { ctx, size in
+                        let lv = audio.level
+                        if let e = current { ctx.opacity = Double(1.0 - fade); e.draw(&ctx, size, lv, time) }
+                        if let n = next { ctx.opacity = Double(fade); n.draw(&ctx, size, lv, time) }
                     }
+                    .onChange(of: now) { _, newNow in tick(now: newNow) }
                 }
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { reseed(crossfade: true) }
         .blur(radius: 4 + 18 * audio.level)
         .scaleEffect(1 + 0.06 * audio.level, anchor: .center)
         .animation(.easeOut(duration: 0.06), value: audio.level)
         .ignoresSafeArea()
         .onAppear {
-            startDate = Date()
-            cycleStart = Date()
-            if !isRunningInPreview() {
-                audio.start()
-            }
+            startDate = Date(); cycleStart = Date()
+            if !isRunningInPreview() { audio.start() }
             initSessionIfNeeded()
         }
         .onDisappear { audio.stop() }
@@ -388,6 +455,26 @@ struct ReactiveBlueView: View {
             current = EffectFactory.randomEffect(rng: &rng, palette: palette)
             next = nil
             cycleStart = Date()
+        }
+    }
+
+    // 時間経過に応じた状態更新（描画フェーズ外で呼ぶ）
+    private func tick(now: Date) {
+        // 初期化（初回のみ）
+        if current == nil {
+            initSessionIfNeeded()
+            return
+        }
+        // 周期満了で次エフェクトを準備（クロスフェード開始）
+        if next == nil && now.timeIntervalSince(cycleStart) > cycleDuration {
+            scheduleNextEffect()
+            return
+        }
+        // フェード完了でコミット
+        if next != nil && now.timeIntervalSince(cycleStart) >= crossfadeDuration {
+            current = next
+            next = nil
+            cycleStart = now
         }
     }
 }
