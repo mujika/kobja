@@ -270,27 +270,56 @@ fileprivate struct TileArc: Tile {
 
 // MARK: - SwiftUI View
 struct TileMosaicView: View {
-    @StateObject private var engine = TileMosaicEngine()
+    // Double-buffered engines for crossfade
+    @State private var current = TileMosaicEngine()
+    @State private var next: TileMosaicEngine? = nil
     @StateObject private var audio = AudioAnalyzer.shared
     @State private var lastTick: Date = Date()
     @State private var bassPulse: CGFloat = 0
+    @State private var cycleStart: Date = Date()
+    @State private var lastSize: CGSize = .zero
+    private let cycleDuration: TimeInterval = 10
+    private let crossfadeDuration: TimeInterval = 1.2
 
     var body: some View {
         TimelineView(.animation) { timeline in
             Canvas { ctx, size in
-                if engine.tiles.isEmpty || engine.unit <= 0 { engine.setup(size: size) }
-                // background
-                ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(engine.palette.bg))
-                // translate to grid origin
-                let origin = engine.origin
-                var c = ctx
-                c.translateBy(x: origin.x, y: origin.y)
-                // draw tiles
-                for tile in engine.tiles {
-                    var localCtx = ctx
+                lastSize = size
+                // Initialize engines for this size
+                if current.tiles.isEmpty || current.unit <= 0 { current.setup(size: size) }
+                if let n = next, (n.tiles.isEmpty || n.unit <= 0) { n.setup(size: size) }
+
+                // Compute fade
+                let now = timeline.date
+                let fading = next != nil
+                let fade = fading ? CGFloat(min(1.0, max(0.0, now.timeIntervalSince(cycleStart) / crossfadeDuration))) : 0
+
+                // Draw current layer
+                var layer = ctx
+                layer.opacity = Double(1 - fade)
+                layer.fill(Path(CGRect(origin: .zero, size: size)), with: .color(current.palette.bg))
+                var lc = layer
+                lc.translateBy(x: current.origin.x, y: current.origin.y)
+                for tile in current.tiles {
+                    var drawCtx = layer
                     var t = tile
-                    t.draw(ctx: &localCtx, origin: engine.origin, unit: engine.unit, audio: audio)
+                    t.draw(ctx: &drawCtx, origin: current.origin, unit: current.unit, audio: audio)
                 }
+
+                // Draw next layer
+                if let n = next {
+                    var layerN = ctx
+                    layerN.opacity = Double(fade)
+                    layerN.fill(Path(CGRect(origin: .zero, size: size)), with: .color(n.palette.bg))
+                    var ln = layerN
+                    ln.translateBy(x: n.origin.x, y: n.origin.y)
+                    for tile in n.tiles {
+                        var drawCtx = layerN
+                        var t = tile
+                        t.draw(ctx: &drawCtx, origin: n.origin, unit: n.unit, audio: audio)
+                    }
+                }
+
                 // Fullscreen bass-reactive pulse overlay
                 let amp = max(0, min(1, audio.low))
                 let pulse = max(amp, bassPulse)
@@ -305,18 +334,45 @@ struct TileMosaicView: View {
             .onChange(of: timeline.date) { _, newNow in
                 let dt = newNow.timeIntervalSince(lastTick)
                 lastTick = newNow
-                engine.step(now: newNow.timeIntervalSince1970, audio: audio)
+                // Step both engines
+                current.step(now: newNow.timeIntervalSince1970, audio: audio)
+                next?.step(now: newNow.timeIntervalSince1970, audio: audio)
                 // Audio-reactive parameters
                 let amp = max(0, min(1, Double(audio.low)))
-                engine.flipChance = min(0.12, max(0.008, 0.006 + 0.025 * amp + (audio.lowBeat ? 0.03 : 0)))
-                engine.noiseChance = max(0.35, min(0.92, 0.55 + 0.35 * amp))
+                current.flipChance = min(0.12, max(0.008, 0.006 + 0.025 * amp + (audio.lowBeat ? 0.03 : 0)))
+                current.noiseChance = max(0.35, min(0.92, 0.55 + 0.35 * amp))
+                if let n = next {
+                    n.flipChance = current.flipChance
+                    n.noiseChance = current.noiseChance
+                }
                 // Bass pulse envelope
                 if audio.lowBeat { bassPulse = 1.0 } else { bassPulse = max(0, bassPulse - CGFloat(dt) * 2.0) }
+
+                // Cycle management: start fade every cycleDuration
+                if next == nil && newNow.timeIntervalSince(cycleStart) > cycleDuration {
+                    var n = TileMosaicEngine()
+                    n.reseed(size: lastSize == .zero ? CGSize(width: 800, height: 600) : lastSize)
+                    next = n
+                    cycleStart = newNow
+                }
+                // Commit fade
+                if let n = next, newNow.timeIntervalSince(cycleStart) >= crossfadeDuration {
+                    current = n
+                    next = nil
+                    cycleStart = newNow
+                }
             }
         }
         .ignoresSafeArea()
         .contentShape(Rectangle())
-        .onTapGesture { engine.reseed(size: NSScreen.main?.visibleFrame.size ?? CGSize(width: 800, height: 600)) }
+        .onTapGesture {
+            // Start immediate crossfade to a fresh reseeded engine
+            var n = TileMosaicEngine()
+            let size = (NSScreen.main?.visibleFrame.size ?? CGSize(width: 800, height: 600))
+            n.reseed(size: lastSize == .zero ? size : lastSize)
+            next = n
+            cycleStart = Date()
+        }
         .onAppear { if !isRunningInPreviewMosaic() { audio.start() } }
         .onDisappear { audio.stop() }
         // Whole-view bass-driven scale/blur
