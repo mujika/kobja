@@ -72,7 +72,7 @@ fileprivate struct TileLines: Tile {
         c.translateBy(x: rect.midX, y: rect.midY)
         c.rotate(by: .radians(Double(rotate) * .pi/2))
         c.translateBy(x: -rect.size.width/2, y: -rect.size.height/2)
-        let lv = max(0.15, Double(audio.level))
+        let lv = max(0.15, Double(audio.low))
         let step = max(4.0, Double(unit) * 0.18)
         let w = max(1.0, Double(unit) * 0.06 * lv * Double(sz))
         let progress = stage == .show ? min(1, t/dur) : 1
@@ -149,7 +149,7 @@ fileprivate struct TileArc: Tile {
         let end: Angle = .radians(Double.pi * 0.5 * progress)
         var p = Path()
         p.addArc(center: CGPoint(x: radius, y: radius), radius: radius*0.9, startAngle: start, endAngle: end, clockwise: false)
-        c.stroke(p, with: .color(color.opacity(0.9)), lineWidth: max(2, radius*0.18 * CGFloat(0.6 + 0.8*audio.level)))
+        c.stroke(p, with: .color(color.opacity(0.9)), lineWidth: max(2, radius*0.18 * CGFloat(0.6 + 0.8*audio.low)))
     }
 }
 
@@ -272,6 +272,8 @@ fileprivate struct TileArc: Tile {
 struct TileMosaicView: View {
     @StateObject private var engine = TileMosaicEngine()
     @StateObject private var audio = AudioAnalyzer.shared
+    @State private var lastTick: Date = Date()
+    @State private var bassPulse: CGFloat = 0
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -289,12 +291,27 @@ struct TileMosaicView: View {
                     var t = tile
                     t.draw(ctx: &localCtx, origin: engine.origin, unit: engine.unit, audio: audio)
                 }
+                // Fullscreen bass-reactive pulse overlay
+                let amp = max(0, min(1, audio.low))
+                let pulse = max(amp, bassPulse)
+                if pulse > 0.01 {
+                    let maxDim = max(size.width, size.height)
+                    let r = maxDim * (0.35 + 0.4 * pulse)
+                    let rect = CGRect(x: size.width/2 - r/2, y: size.height/2 - r/2, width: r, height: r)
+                    let g = Gradient(colors: [Color.white.opacity(0.18 * pulse), .clear])
+                    ctx.fill(Path(ellipseIn: rect), with: .radialGradient(g, center: .init(x: size.width/2, y: size.height/2), startRadius: 0, endRadius: r/2))
+                }
             }
             .onChange(of: timeline.date) { _, newNow in
+                let dt = newNow.timeIntervalSince(lastTick)
+                lastTick = newNow
                 engine.step(now: newNow.timeIntervalSince1970, audio: audio)
                 // Audio-reactive parameters
-                engine.flipChance = max(0.005, 0.01 + 0.02 * Double(audio.flux))
-                engine.noiseChance = max(0.3, min(0.9, 0.6 + 0.3 * audio.level))
+                let amp = max(0, min(1, Double(audio.low)))
+                engine.flipChance = min(0.12, max(0.008, 0.006 + 0.025 * amp + (audio.lowBeat ? 0.03 : 0)))
+                engine.noiseChance = max(0.35, min(0.92, 0.55 + 0.35 * amp))
+                // Bass pulse envelope
+                if audio.lowBeat { bassPulse = 1.0 } else { bassPulse = max(0, bassPulse - CGFloat(dt) * 2.0) }
             }
         }
         .ignoresSafeArea()
@@ -302,6 +319,9 @@ struct TileMosaicView: View {
         .onTapGesture { engine.reseed(size: NSScreen.main?.visibleFrame.size ?? CGSize(width: 800, height: 600)) }
         .onAppear { if !isRunningInPreviewMosaic() { audio.start() } }
         .onDisappear { audio.stop() }
+        // Whole-view bass-driven scale/blur
+        .scaleEffect(1 + 0.05 * max(0, min(1, audio.low)) + 0.04 * bassPulse)
+        .blur(radius: 2 + 10 * max(0, min(1, audio.low)) + 6 * bassPulse)
     }
 }
 

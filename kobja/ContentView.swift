@@ -42,11 +42,15 @@ final class AudioAnalyzer: ObservableObject {
     @Published var high: CGFloat = 0   // FFT帯域エネルギー（高）
     @Published var centroid: CGFloat = 0  // スペクトル重心（Hz）
     @Published var flux: CGFloat = 0      // スペクトルフラックス
-    @Published var beat: Bool = false     // 簡易ビート検出
+    @Published var beat: Bool = false     // 簡易ビート検出（全帯域）
+    @Published var lowBeat: Bool = false  // 低域中心のキック検出
 
     private let engine = AVAudioEngine()
     private var isRunning = false
     private var featureExtractor: AudioFeatureExtractor?
+    // 低域エンベロープとゲート
+    private var lowEnv: Float = 0
+    private var lastLowBeatTS: CFTimeInterval = 0
     private var smoothing: Float = 0
     // 自動ゲイン制御（環境音量に自動追従）
     private var agcPeak: Float = 0.02
@@ -102,6 +106,13 @@ final class AudioAnalyzer: ObservableObject {
                 let flux = CGFloat(min(1, feats.flux * 4))
                 let centroid = CGFloat(feats.centroid)
                 let beat = feats.beat
+                // 低域キック検出（簡易）：低域パワーの立ち上がり + クールダウン
+                let lowPow = max(0, feats.low)
+                // エンベロープ追従（立上り速め、減衰遅め）
+                let rise: Float = 0.25, fall: Float = 0.06
+                if lowPow > lowEnv { lowEnv = (1 - rise) * lowEnv + rise * lowPow }
+                else { lowEnv = (1 - fall) * lowEnv + fall * lowPow }
+                let candidate = (lowPow > lowEnv * 1.35) && lowPow > 1e-5
                 Task { @MainActor in
                     self.low = lo
                     self.mid = mi
@@ -109,6 +120,14 @@ final class AudioAnalyzer: ObservableObject {
                     self.flux = flux
                     self.centroid = centroid
                     self.beat = beat
+                    // ゲート 120ms で疑陽性を抑制
+                    let now = CACurrentMediaTime()
+                    if candidate && now - self.lastLowBeatTS > 0.12 {
+                        self.lowBeat = true
+                        self.lastLowBeatTS = now
+                    } else {
+                        self.lowBeat = false
+                    }
                 }
             }
 
