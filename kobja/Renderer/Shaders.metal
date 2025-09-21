@@ -89,3 +89,73 @@ fragment float4 kaleidoFragment(VSOut in [[stage_in]], constant VisualUniforms& 
     return float4(col, 1.0);
 }
 
+// Mirror wall uniforms must match MirrorUniforms in Swift
+struct MirrorUniforms {
+    float2 resolution;
+    float time;
+    float seed;
+    float level;
+    float low;
+    float mid;
+    float high;
+    float flux;
+    float beat;
+    float cols;
+    float rows;
+    float seamWidth;
+    float seamBright;
+    float curveAmt;
+    float noiseAmp;
+    float noiseSpeed;
+};
+
+float hash21(float2 p) {
+    p = fract(p*float2(123.34, 456.21));
+    p += dot(p, p+45.32);
+    return fract(p.x*p.y);
+}
+
+// Simple analytic noise from sines (cheap)
+float noise2(float2 p) {
+    return 0.5 + 0.5 * (sin(p.x) * sin(p.y));
+}
+
+fragment float4 mirrorFragment(VSOut in [[stage_in]],
+                               constant MirrorUniforms& u [[buffer(0)]],
+                               texture2d<float> camTex [[texture(0)]]) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 R = u.resolution;
+    float2 uv = in.uv;
+    float2 grid = float2(max(1.0,u.cols), max(1.0,u.rows));
+    float2 suv = uv * grid;
+    float2 cell = floor(suv);
+    float2 fuv = fract(suv); // 0..1 inside tile
+
+    // Tile center-based warp (mild barrel/ pincushion)
+    float2 p = fuv - 0.5;
+    float r = length(p);
+    float k = u.curveAmt;
+    float2 warp = p * (k * r*r);
+    float n = noise2(p*18.0 + u.time*u.noiseSpeed*2.0);
+    warp += (n-0.5) * u.noiseAmp;
+
+    float2 srcUV = (cell + (fuv + warp)) / grid;
+    float4 col = float4(0.0,0.0,0.0,1.0);
+    if (camTex.get_width() > 0) {
+        col = camTex.sample(s, clamp(srcUV, 0.0, 1.0));
+    }
+
+    // Vertical & optional horizontal seams
+    float seamX = min(fuv.x, 1.0 - fuv.x);
+    float seamY = min(fuv.y, 1.0 - fuv.y);
+    float w = max(0.0005, u.seamWidth);
+    float ax = smoothstep(w, 0.0, seamX);
+    float ay = smoothstep(w, 0.0, seamY);
+    float seam = max(ax, 0.0); // emphasize vertical
+    float seamHL = pow(seam, 2.0) * u.seamBright;
+    col.rgb += seamHL;
+
+    // Subtle gamma and exposure
+    col.rgb = pow(col.rgb, float3(1.0/1.2));
+    return float4(col.rgb, 1.0);
+}

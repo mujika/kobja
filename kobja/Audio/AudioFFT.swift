@@ -67,7 +67,7 @@ final class AudioFeatureExtractor {
             outImag.withUnsafeMutableBufferPointer { iPtr in
                 inReal.withUnsafeMutableBufferPointer { irPtr in
                     inImag.withUnsafeMutableBufferPointer { iiPtr in
-                        var inSplit = DSPSplitComplex(realp: irPtr.baseAddress!, imagp: iiPtr.baseAddress!)
+                        let inSplit = DSPSplitComplex(realp: irPtr.baseAddress!, imagp: iiPtr.baseAddress!)
                         var outSplit = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
                         fft?.forward(input: inSplit, output: &outSplit)
                         vDSP.squareMagnitudes(outSplit, result: &mag)

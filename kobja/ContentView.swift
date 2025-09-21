@@ -393,7 +393,7 @@ struct ReactiveBlueView: View {
     var body: some View {
         Group {
             if MTLCreateSystemDefaultDevice() != nil {
-                MetalVisualView(seed: sessionSeed, baseRGB: palette.baseRGB, accentRGB: palette.accentRGB)
+                MetalVisualView(seed: sessionSeed, baseRGB: palette.baseRGB, accentRGB: palette.accentRGB, mode: .mirror)
                     .contentShape(Rectangle())
                     .onTapGesture { reseed(crossfade: true) }
             } else {
