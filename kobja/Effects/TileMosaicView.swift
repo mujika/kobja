@@ -169,9 +169,18 @@ fileprivate struct TileArc: Tile {
     var lastChangeTime: CFTimeInterval = 0
     var lastBeatTime: CFTimeInterval = 0
     var palette: MosaicPalette = palettes.randomElement()!
+    // Distribution controls
+    var fillRatio: CGFloat = 0.6               // target density across grid (0..1)
+    var noisePhaseX: CGFloat = 0               // random phase to avoid fixed noise bias
+    var noisePhaseY: CGFloat = 0
+    var candidateK: Int = 20                   // blue-noise: number of random candidates per pick
+    var neighborRadius: CGFloat = 1.25         // blue-noise: how far to check occupancy
 
     fileprivate func reseed(size: CGSize) {
         palette = palettes.randomElement()!
+        // randomize noise phase each reseed
+        noisePhaseX = CGFloat.random(in: 0...1000)
+        noisePhaseY = CGFloat.random(in: 0...1000)
         setup(size: size)
     }
 
@@ -179,6 +188,9 @@ fileprivate struct TileArc: Tile {
         m = min(size.width, size.height) * 0.75
         unit = m / CGFloat(n)
         origin = CGPoint(x: (size.width - m)/2 + unit/2, y: (size.height - m)/2 + unit/2)
+        // auto target density based on grid size
+        let gridCells = n * n
+        idealLength = max(24, Int(CGFloat(gridCells) * fillRatio))
         tiles = makeTiles(idealLength)
         lastChangeTime = CACurrentMediaTime()
     }
@@ -189,7 +201,7 @@ fileprivate struct TileArc: Tile {
         var tries = 0
         func key(_ x: CGFloat, _ y: CGFloat) -> String { "\(x),\(y)" }
         while res.count < count && tries < 1000 {
-            let spot = findSpot(addTiles: res, occupied: &occupied)
+            let spot = findSpotBlueNoise(addTiles: res, occupied: &occupied)
             if let s = spot, let tile = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
                 res.append(tile)
                 occupied.insert(key(s.x, s.y))
@@ -199,23 +211,43 @@ fileprivate struct TileArc: Tile {
         return res
     }
 
-    fileprivate func findSpot(addTiles: [any Tile], occupied: inout Set<String>) -> (x: CGFloat, y: CGFloat, sz: Int)? {
-        var tries = 0
+    // Blue-noise candidate selection: sample K random candidates and pick the one
+    // with the lowest neighbor occupancy score (uniform distribution).
+    fileprivate func findSpotBlueNoise(addTiles: [any Tile], occupied: inout Set<String>) -> (x: CGFloat, y: CGFloat, sz: Int)? {
         func key(_ x: CGFloat, _ y: CGFloat) -> String { "\(x),\(y)" }
-        while tries < n*n {
+        // helper: count neighbors around a coordinate within neighborRadius
+        func neighborScore(_ xx: CGFloat, _ yy: CGFloat) -> CGFloat {
+            var score: CGFloat = 0
+            for t in addTiles {
+                let dx = abs(t.x - xx)
+                let dy = abs(t.y - yy)
+                if dx + dy <= neighborRadius { score += 1 }
+            }
+            // slight bias away from top-left corner (reduce clustering)
+            let cx = CGFloat(n - 1) / 2
+            let cy = CGFloat(n - 1) / 2
+            let centerBias = (abs(xx - cx) + abs(yy - cy)) / CGFloat(n)
+            return score + 0.05 * centerBias
+        }
+
+        var best: (x: CGFloat, y: CGFloat, sz: Int, score: CGFloat)? = nil
+        let K = max(8, candidateK)
+        for _ in 0..<K {
             var x = CGFloat(Int.random(in: 0..<n))
             var y = CGFloat(Int.random(in: 0..<n))
             var sz = Int.random(in: 1...2)
             if sz == 2 && x > 0 && y > 0 { x -= 0.5; y -= 0.5 } else { sz = 1 }
-            let exists = occupied.contains(key(x,y)) || addTiles.contains(where: { $0.x == x && $0.y == y })
-            if !exists { return (x,y,sz) }
-            tries += 1
+            if occupied.contains(key(x,y)) || addTiles.contains(where: { $0.x == x && $0.y == y }) { continue }
+            let sc = neighborScore(x, y)
+            if best == nil || sc < best!.score { best = (x, y, sz, sc) }
         }
+        if let b = best { return (b.x, b.y, b.sz) }
         return nil
     }
 
     fileprivate func maybeMakeTile(x: CGFloat, y: CGFloat, sz: Int) -> (any Tile)? {
-        let nval = noise2(x*CGFloat(sz)*noiseFreq, y*CGFloat(sz)*noiseFreq)
+        // randomized noise phase to avoid fixed spatial bias
+        let nval = noise2((x + noisePhaseX)*CGFloat(sz)*noiseFreq, (y + noisePhaseY)*CGFloat(sz)*noiseFreq)
         if nval < 1 - noiseChance { return nil }
         return makeTile(x: x, y: y, sz: sz)
     }
@@ -251,7 +283,7 @@ fileprivate struct TileArc: Tile {
         // Soft refresh: if too few tiles, add more
         if tiles.count < idealLength {
             var scratch = Set<String>()
-            if let s = findSpot(addTiles: tiles, occupied: &scratch), let t = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
+            if let s = findSpotBlueNoise(addTiles: tiles, occupied: &scratch), let t = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
                 tiles.append(t)
             }
         }
