@@ -13,7 +13,7 @@ final class AudioFeatureExtractor {
     }
 
     private let fftSize: Int
-    private var dft: vDSP.DFT<Float>?
+    private var fft: vDSP.FFT<DSPSplitComplex>?
     private var window: [Float]
     private var prevMag: [Float]
     private var fluxEMA: Float = 0
@@ -25,10 +25,8 @@ final class AudioFeatureExtractor {
         guard fftSize.isPowerOfTwo else { return nil }
         self.fftSize = fftSize
         self.sr = Float(sampleRate)
-        self.dft = vDSP.DFT<Float>(count: fftSize,
-                                   direction: .forward,
-                                   transformType: .complex,
-                                   ofType: Float.self)
+        let log2n = vDSP_Length(Int(log2(Double(fftSize))))
+        self.fft = vDSP.FFT(log2n: log2n, radix: .radix2, ofType: DSPSplitComplex.self)
         self.window = vDSP.window(ofType: Float.self, usingSequence: .hanningDenormalized, count: fftSize, isHalfWindow: false)
         self.prevMag = [Float](repeating: 0, count: fftSize/2)
     }
@@ -48,16 +46,23 @@ final class AudioFeatureExtractor {
         input = vDSP.multiply(input, window)
 
         // Real DFT
-        var outReal = [Float](repeating: 0, count: fftSize)
-        var outImag = [Float](repeating: 0, count: fftSize)
-        let inImag = [Float](repeating: 0, count: fftSize)
-        dft?.transform(inputReal: input, inputImag: inImag, resultReal: &outReal, resultImag: &outImag)
+        var outReal = [Float](repeating: 0, count: fftSize/2)
+        var outImag = [Float](repeating: 0, count: fftSize/2)
+        outReal.withUnsafeMutableBufferPointer { rPtr in
+            outImag.withUnsafeMutableBufferPointer { iPtr in
+                var split = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
+                fft?.forward(input: input, output: &split)
+            }
+        }
 
         // Magnitude^2
-        let magR = vDSP.square(outReal)
-        let magI = vDSP.square(outImag)
-        var magFull = vDSP.add(magR, magI)
-        var mag = Array(magFull.prefix(fftSize/2))
+        var mag = [Float](repeating: 0, count: fftSize/2)
+        outReal.withUnsafeMutableBufferPointer { rPtr in
+            outImag.withUnsafeMutableBufferPointer { iPtr in
+                var split = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
+                vDSP.squareMagnitudes(split, result: &mag)
+            }
+        }
 
         // Energy bands
         let binHz = sr / Float(fftSize)
@@ -75,8 +80,7 @@ final class AudioFeatureExtractor {
         f.level = sqrtf(total / Float(max(1, b3-b0)))
 
         // Spectral centroid
-        var idx = [Float](repeating: 0, count: b3-b0)
-        vDSP.ramp(withInitialValue: Float(b0), increment: 1, count: b3-b0, result: &idx)
+        let idx = vDSP.ramp(withInitialValue: Float(b0), increment: 1, count: b3-b0)
         let freqs = vDSP.multiply(binHz, idx)
         let mags = Array(mag[b0..<b3])
         let num: Float = vDSP.dot(freqs, mags)
