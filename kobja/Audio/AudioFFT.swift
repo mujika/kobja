@@ -45,22 +45,34 @@ final class AudioFeatureExtractor {
         }
         input = vDSP.multiply(input, window)
 
-        // Real DFT
-        var outReal = [Float](repeating: 0, count: fftSize/2)
-        var outImag = [Float](repeating: 0, count: fftSize/2)
-        outReal.withUnsafeMutableBufferPointer { rPtr in
-            outImag.withUnsafeMutableBufferPointer { iPtr in
-                var split = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
-                fft?.forward(input: input, output: &split)
+        // Real FFT: pack real input into split-complex (even->real, odd->imag)
+        var inReal = [Float](repeating: 0, count: fftSize/2)
+        var inImag = [Float](repeating: 0, count: fftSize/2)
+        input.withUnsafeBufferPointer { inPtr in
+            inReal.withUnsafeMutableBufferPointer { rPtr in
+                inImag.withUnsafeMutableBufferPointer { iPtr in
+                    var inSplit = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
+                    inPtr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize/2) { complexPtr in
+                        vDSP_ctoz(complexPtr, 2, &inSplit, 1, vDSP_Length(fftSize/2))
+                    }
+                }
             }
         }
 
-        // Magnitude^2
+        // Execute FFT (split-complex in -> split-complex out)
+        var outReal = [Float](repeating: 0, count: fftSize/2)
+        var outImag = [Float](repeating: 0, count: fftSize/2)
         var mag = [Float](repeating: 0, count: fftSize/2)
         outReal.withUnsafeMutableBufferPointer { rPtr in
             outImag.withUnsafeMutableBufferPointer { iPtr in
-                var split = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
-                vDSP.squareMagnitudes(split, result: &mag)
+                inReal.withUnsafeMutableBufferPointer { irPtr in
+                    inImag.withUnsafeMutableBufferPointer { iiPtr in
+                        var inSplit = DSPSplitComplex(realp: irPtr.baseAddress!, imagp: iiPtr.baseAddress!)
+                        var outSplit = DSPSplitComplex(realp: rPtr.baseAddress!, imagp: iPtr.baseAddress!)
+                        fft?.forward(input: inSplit, output: &outSplit)
+                        vDSP.squareMagnitudes(outSplit, result: &mag)
+                    }
+                }
             }
         }
 
