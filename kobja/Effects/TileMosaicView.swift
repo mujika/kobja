@@ -276,6 +276,7 @@ struct TileMosaicView: View {
     @StateObject private var audio = AudioAnalyzer.shared
     @State private var lastTick: Date = Date()
     @State private var bassPulse: CGFloat = 0
+    @State private var blurDrop: CGFloat = 0
     @State private var cycleStart: Date = Date()
     @State private var lastSize: CGSize = .zero
     private let cycleDuration: TimeInterval = 10
@@ -347,6 +348,12 @@ struct TileMosaicView: View {
                 }
                 // Bass pulse envelope
                 if audio.lowBeat { bassPulse = 1.0 } else { bassPulse = max(0, bassPulse - CGFloat(dt) * 2.0) }
+                // Occasionally drop blur to zero on low beat, then recover quickly
+                if audio.lowBeat && Double.random(in: 0...1) < 0.15 {
+                    blurDrop = 1.0
+                }
+                let dropRecover: CGFloat = 0.35 // seconds to fully recover
+                blurDrop = max(0, blurDrop - CGFloat(dt) / dropRecover)
 
                 // Cycle management: start fade every cycleDuration
                 if next == nil && newNow.timeIntervalSince(cycleStart) > cycleDuration {
@@ -377,7 +384,7 @@ struct TileMosaicView: View {
         .onDisappear { audio.stop() }
         // Whole-view bass-driven scale/blur
         .scaleEffect(1 + 0.05 * max(0, min(1, audio.low)) + 0.04 * bassPulse)
-        .blur(radius: 2 + 10 * max(0, min(1, audio.low)) + 6 * bassPulse)
+        .blur(radius: max(0, (2 + 4 * max(0, min(1, audio.low)) + 4 * bassPulse) * (1 - blurDrop)))
     }
 }
 
