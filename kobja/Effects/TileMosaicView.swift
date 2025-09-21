@@ -39,9 +39,9 @@ private func noise2(_ x: CGFloat, _ y: CGFloat) -> CGFloat {
 }
 
 // MARK: - Tiles
-private enum TileStage { case show, steady, hide }
+fileprivate enum TileStage { case show, steady, hide }
 
-private protocol Tile {
+fileprivate protocol Tile {
     var x: CGFloat { get set }
     var y: CGFloat { get set }
     var sz: Int { get set }
@@ -50,12 +50,12 @@ private protocol Tile {
     var dur: Double { get set }
     var stage: TileStage { get set }
     var t: Double { get set } // 0..dur
-    func update(_ dt: Double)
-    func flip()
+    mutating func update(_ dt: Double)
+    mutating func flip()
     func draw(ctx: inout GraphicsContext, origin: CGPoint, unit: CGFloat, audio: AudioAnalyzer)
 }
 
-private extension Tile {
+fileprivate extension Tile {
     mutating func update(_ dt: Double) {
         t = min(dur, t + dt)
         if stage == .show && t >= dur { stage = .steady; t = 0 }
@@ -64,7 +64,7 @@ private extension Tile {
     mutating func flip() { rotate = (rotate + 2) % 4; stage = .show; t = 0 }
 }
 
-private struct TileLines: Tile {
+fileprivate struct TileLines: Tile {
     var x: CGFloat; var y: CGFloat; var sz: Int; var rotate: Int; var color: Color; var dur: Double; var stage: TileStage = .show; var t: Double = 0
     func draw(ctx: inout GraphicsContext, origin: CGPoint, unit: CGFloat, audio: AudioAnalyzer) {
         let rect = CGRect(x: origin.x + x*unit, y: origin.y + y*unit, width: CGFloat(sz)*unit, height: CGFloat(sz)*unit)
@@ -88,7 +88,7 @@ private struct TileLines: Tile {
     }
 }
 
-private struct TileTris: Tile {
+fileprivate struct TileTris: Tile {
     var x: CGFloat; var y: CGFloat; var sz: Int; var rotate: Int; var color: Color; var dur: Double; var stage: TileStage = .show; var t: Double = 0
     func draw(ctx: inout GraphicsContext, origin: CGPoint, unit: CGFloat, audio: AudioAnalyzer) {
         let rect = CGRect(x: origin.x + x*unit, y: origin.y + y*unit, width: CGFloat(sz)*unit, height: CGFloat(sz)*unit)
@@ -114,7 +114,7 @@ private struct TileTris: Tile {
     }
 }
 
-private struct TileTriSquare: Tile {
+fileprivate struct TileTriSquare: Tile {
     var x: CGFloat; var y: CGFloat; var sz: Int; var rotate: Int; var color: Color; var dur: Double; var stage: TileStage = .show; var t: Double = 0
     func draw(ctx: inout GraphicsContext, origin: CGPoint, unit: CGFloat, audio: AudioAnalyzer) {
         let rect = CGRect(x: origin.x + x*unit, y: origin.y + y*unit, width: CGFloat(sz)*unit, height: CGFloat(sz)*unit)
@@ -135,7 +135,7 @@ private struct TileTriSquare: Tile {
     }
 }
 
-private struct TileArc: Tile {
+fileprivate struct TileArc: Tile {
     var x: CGFloat; var y: CGFloat; var sz: Int; var rotate: Int; var color: Color; var dur: Double; var stage: TileStage = .show; var t: Double = 0
     func draw(ctx: inout GraphicsContext, origin: CGPoint, unit: CGFloat, audio: AudioAnalyzer) {
         let rect = CGRect(x: origin.x + x*unit, y: origin.y + y*unit, width: CGFloat(sz)*unit, height: CGFloat(sz)*unit)
@@ -155,7 +155,7 @@ private struct TileArc: Tile {
 
 // MARK: - Engine
 @MainActor final class TileMosaicEngine: ObservableObject {
-    @Published var tiles: [any Tile] = []
+    @Published fileprivate var tiles: [any Tile] = []
     var n: Int = 10
     var changeInterval: Double = 0.03 // seconds per animation frame step
     var idealLength: Int = 50
@@ -170,12 +170,12 @@ private struct TileArc: Tile {
     var lastBeatTime: CFTimeInterval = 0
     var palette: MosaicPalette = palettes.randomElement()!
 
-    func reseed(size: CGSize) {
+    fileprivate func reseed(size: CGSize) {
         palette = palettes.randomElement()!
         setup(size: size)
     }
 
-    func setup(size: CGSize) {
+    fileprivate func setup(size: CGSize) {
         m = min(size.width, size.height) * 0.75
         unit = m / CGFloat(n)
         origin = CGPoint(x: (size.width - m)/2 + unit/2, y: (size.height - m)/2 + unit/2)
@@ -183,7 +183,7 @@ private struct TileArc: Tile {
         lastChangeTime = CACurrentMediaTime()
     }
 
-    func makeTiles(_ count: Int) -> [any Tile] {
+    fileprivate func makeTiles(_ count: Int) -> [any Tile] {
         var res: [any Tile] = []
         var occupied = Set<String>()
         var tries = 0
@@ -199,7 +199,7 @@ private struct TileArc: Tile {
         return res
     }
 
-    func findSpot(addTiles: [any Tile], occupied: inout Set<String>) -> (x: CGFloat, y: CGFloat, sz: Int)? {
+    fileprivate func findSpot(addTiles: [any Tile], occupied: inout Set<String>) -> (x: CGFloat, y: CGFloat, sz: Int)? {
         var tries = 0
         func key(_ x: CGFloat, _ y: CGFloat) -> String { "\(x),\(y)" }
         while tries < n*n {
@@ -214,13 +214,13 @@ private struct TileArc: Tile {
         return nil
     }
 
-    func maybeMakeTile(x: CGFloat, y: CGFloat, sz: Int) -> (any Tile)? {
+    fileprivate func maybeMakeTile(x: CGFloat, y: CGFloat, sz: Int) -> (any Tile)? {
         let nval = noise2(x*CGFloat(sz)*noiseFreq, y*CGFloat(sz)*noiseFreq)
         if nval < 1 - noiseChance { return nil }
         return makeTile(x: x, y: y, sz: sz)
     }
 
-    func makeTile(x: CGFloat, y: CGFloat, sz: Int) -> any Tile {
+    fileprivate func makeTile(x: CGFloat, y: CGFloat, sz: Int) -> any Tile {
         let options: [any Tile] = [
             TileTris(x: x, y: y, sz: sz, rotate: 0, color: palette.colors.randomElement()!, dur: duration),
             TileTriSquare(x: x, y: y, sz: sz, rotate: 0, color: palette.colors.randomElement()!, dur: duration),
@@ -238,7 +238,7 @@ private struct TileArc: Tile {
         return tile
     }
 
-    func step(now: CFTimeInterval, audio: AudioAnalyzer) {
+    fileprivate func step(now: CFTimeInterval, audio: AudioAnalyzer) {
         let dt = max(0, now - lastChangeTime)
         lastChangeTime = now
         // Update tiles
@@ -258,7 +258,7 @@ private struct TileArc: Tile {
         tiles.removeAll { $0.stage == .hide && $0.t >= $0.dur }
     }
 
-    func randomFlip(count: Int) {
+    fileprivate func randomFlip(count: Int) {
         guard !tiles.isEmpty else { return }
         for _ in 0..<count {
             let idx = Int.random(in: 0..<tiles.count)
@@ -284,8 +284,9 @@ struct TileMosaicView: View {
                 c.translateBy(x: origin.x, y: origin.y)
                 // draw tiles
                 for tile in engine.tiles {
+                    var localCtx = ctx
                     var t = tile
-                    t.draw(ctx: &ctx, origin: engine.origin, unit: engine.unit, audio: audio)
+                    t.draw(ctx: &localCtx, origin: engine.origin, unit: engine.unit, audio: audio)
                 }
             }
             .onChange(of: timeline.date) { _, newNow in
@@ -298,8 +299,13 @@ struct TileMosaicView: View {
         .ignoresSafeArea()
         .contentShape(Rectangle())
         .onTapGesture { engine.reseed(size: NSScreen.main?.visibleFrame.size ?? CGSize(width: 800, height: 600)) }
-        .onAppear { if !isRunningInPreview() { audio.start() } }
+        .onAppear { if !isRunningInPreviewMosaic() { audio.start() } }
         .onDisappear { audio.stop() }
     }
 }
 
+// Local preview detection (avoid dependency on ContentView helper)
+private func isRunningInPreviewMosaic() -> Bool {
+    let env = ProcessInfo.processInfo.environment
+    return env["XCODE_RUNNING_FOR_PREVIEWS"] == "1" || env["XCODE_RUNNING_FOR_PLAYGROUNDS"] == "1"
+}
