@@ -250,7 +250,8 @@ fileprivate struct TileArc: Tile {
         }
         // Soft refresh: if too few tiles, add more
         if tiles.count < idealLength {
-            if let s = findSpot(addTiles: tiles, occupied: &Set<String>()) , let t = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
+            var scratch = Set<String>()
+            if let s = findSpot(addTiles: tiles, occupied: &scratch), let t = maybeMakeTile(x: s.x, y: s.y, sz: s.sz) {
                 tiles.append(t)
             }
         }
